@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits } = require("discord.js");
+const { Client, GatewayIntentBits, EmbedBuilder } = require("discord.js");
 const fetch = require("node-fetch");
 
 const TOKEN = process.env.DISCORD_TOKEN;
@@ -8,99 +8,96 @@ if (!TOKEN) {
     process.exit(1);
 }
 
+const client = new Client({
+    intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent
+    ]
+});
+
+// Store scripts per user
+const userScripts = new Map();
+
+// ============================================================
+// DEOBFUSCATOR CLASS
+// ============================================================
+
 class LunrDeobfuscator {
     constructor(code) {
         this.code = code;
         this.result = "";
         this.obfuscatorType = "Unknown";
-        this.stats = { stringsDecoded: 0, patterns: 0 };
+        this.stats = { decoded: 0 };
     }
 
     detect() {
         const c = this.code.toLowerCase();
-        if (/moonsec/.test(c) || /local\s+[a-z_]\s*=\s*\{[^}]*["'][^"']*["']/.test(c)) return "MoonSec";
+        if (/moonsec|local\s+[a-z_]\s*=\s*\{[^}]*["']/.test(c)) return "MoonSec";
         if (/wearedevs/.test(c)) return "WeAreDevs";
-        if (/ironbrew/.test(c) || /getfenv/.test(c)) return "IronBrew";
+        if (/ironbrew|getfenv/.test(c)) return "IronBrew";
         return "Unknown";
-    }
-
-    decodeOctal(str) {
-        return str.replace(/\\(\d{3})/g, (_, oct) => {
-            if (/[0-7]{3}/.test(oct)) {
-                this.stats.patterns++;
-                return String.fromCharCode(parseInt(oct, 8));
-            }
-            return `\\${oct}`;
-        });
-    }
-
-    decodeHex(str) {
-        return str.replace(/\\x([0-9a-fA-F]{2})/g, (_, hex) => {
-            this.stats.patterns++;
-            return String.fromCharCode(parseInt(hex, 16));
-        });
-    }
-
-    decodeStringChar(str) {
-        return str.replace(/string\.char\(([^)]+)\)/g, (_, nums) => {
-            const chars = nums.split(",").map(n => {
-                const num = parseInt(n.trim());
-                return num ? String.fromCharCode(num) : "";
-            });
-            this.stats.stringsDecoded++;
-            return `"${chars.join("")}"`;
-        });
-    }
-
-    extractStringTable(code) {
-        const tableMatch = code.match(/local\s+([a-z_]+)\s*=\s*\{([^}]+)\}/);
-        if (!tableMatch) return code;
-        
-        const varName = tableMatch[1];
-        const strings = tableMatch[2].match(/"([^"]*)"/g);
-        
-        if (!strings) return code;
-        
-        let result = code;
-        for (let i = 0; i < strings.length; i++) {
-            const decoded = this.decodeOctal(this.decodeHex(strings[i].slice(1, -1)));
-            result = result.replace(new RegExp(`${varName}\\[${i + 1}\\]`, "g"), `"${decoded}"`);
-            this.stats.stringsDecoded++;
-        }
-        
-        result = result.replace(new RegExp(`local ${varName} = \\{[^}]+\\};?`, "g"), "");
-        return result;
     }
 
     deobfuscate() {
         this.obfuscatorType = this.detect();
-        
         let result = this.code;
-        result = this.decodeOctal(result);
-        result = this.decodeHex(result);
-        result = this.decodeStringChar(result);
         
-        if (this.obfuscatorType === "MoonSec" || this.obfuscatorType === "WeAreDevs") {
-            result = this.extractStringTable(result);
+        // Decode \123 octal
+        result = result.replace(/\\(\d{3})/g, (_, oct) => {
+            if (/[0-7]{3}/.test(oct)) {
+                this.stats.decoded++;
+                return String.fromCharCode(parseInt(oct, 8));
+            }
+            return `\\${oct}`;
+        });
+        
+        // Decode \x48 hex
+        result = result.replace(/\\x([0-9a-fA-F]{2})/g, (_, hex) => {
+            this.stats.decoded++;
+            return String.fromCharCode(parseInt(hex, 16));
+        });
+        
+        // Decode string.char(65,66)
+        result = result.replace(/string\.char\(([^)]+)\)/g, (_, nums) => {
+            const chars = nums.split(",").map(n => String.fromCharCode(parseInt(n.trim())));
+            this.stats.decoded++;
+            return `"${chars.join("")}"`;
+        });
+        
+        // Extract and decode string tables
+        const tableMatch = result.match(/local\s+([a-z_]+)\s*=\s*\{([^}]+)\}/);
+        if (tableMatch) {
+            const varName = tableMatch[1];
+            const strings = tableMatch[2].match(/"([^"]*)"/g);
+            if (strings) {
+                strings.forEach((str, i) => {
+                    const decoded = str.slice(1, -1).replace(/\\(\d{3})/g, (_, oct) => {
+                        return /[0-7]{3}/.test(oct) ? String.fromCharCode(parseInt(oct, 8)) : `\\${oct}`;
+                    });
+                    result = result.replace(new RegExp(`${varName}\\[${i + 1}\\]`, "g"), `"${decoded}"`);
+                    this.stats.decoded++;
+                });
+                result = result.replace(new RegExp(`local ${varName} = \\{[^}]+\\};?`, "g"), "");
+            }
         }
         
+        // Cleanup
         result = result.replace(/\n\s*\n/g, "\n").trim();
         result = result.replace(/;\s*\n/g, "\n");
         
         this.result = result;
-        return { success: true, result: this.result };
+        return result;
     }
 }
 
-const client = new Client({
-    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
-});
-
-const userScripts = new Map();
+// ============================================================
+// FETCH FUNCTIONS
+// ============================================================
 
 async function fetchUrl(url) {
     try {
-        const res = await fetch(url, { headers: { "User-Agent": "Lunr-Bot/1.0" } });
+        const res = await fetch(url, { headers: { "User-Agent": "Lunr-Bot" } });
         if (res.ok) return await res.text();
     } catch (e) {}
     return null;
@@ -114,7 +111,11 @@ async function fetchScript(target) {
     return null;
 }
 
-client.once("ready", async () => {
+// ============================================================
+// DISCORD COMMANDS
+// ============================================================
+
+client.once("ready", () => {
     console.log(`✅ Lunr Bot ready - ${client.user.tag}`);
     console.log(`📡 Commands: .get, .deobf, .detect`);
 });
@@ -126,9 +127,10 @@ client.on("messageCreate", async (message) => {
     const args = message.content.slice(1).trim().split(/ +/);
     const command = args.shift().toLowerCase();
     
+    // .get command
     if (command === "get") {
         const target = args.join(" ");
-        if (!target) return message.reply("❌ Usage: `.get <url|asset_id>`");
+        if (!target) return message.reply("❌ Usage: `.get <url|asset_id|loadstring>`");
         
         await message.reply("🔍 Fetching...");
         const content = await fetchScript(target);
@@ -141,9 +143,10 @@ client.on("messageCreate", async (message) => {
         userScripts.set(message.author.id, content);
         
         const preview = content.slice(0, 400) + (content.length > 400 ? "..." : "");
-        await message.reply(`✅ ${content.length} bytes | **${obfType}**\n\`\`\`lua\n${preview}\n\`\`\`\n🔧 Use \`.deobf\` to deobfuscate`);
+        await message.reply(`✅ ${content.length} bytes | **${obfType}**\n\`\`\`lua\n${preview}\n\`\`\`\n🔧 Use \`.deobf\``);
     }
     
+    // .deobf command
     if (command === "deobf") {
         const content = userScripts.get(message.author.id);
         if (!content) return message.reply("❌ No script. Use `.get` first");
@@ -154,17 +157,19 @@ client.on("messageCreate", async (message) => {
             const deobf = new LunrDeobfuscator(content);
             const result = deobf.deobfuscate();
             
-            if (result.result === content) {
-                await msg.edit(`⚠️ Could not deobfuscate **${deobf.obfuscatorType}**.`);
+            if (result === content) {
+                await msg.edit(`⚠️ Could not deobfuscate **${deobf.obfuscatorType}**. Script may use advanced VM protection.`);
                 return;
             }
             
             await msg.edit("✅ Complete!");
             
-            if (result.result.length > 1900) {
-                await message.reply({ files: [{ attachment: Buffer.from(result.result, "utf-8"), name: "deobfuscated.lua" }] });
+            if (result.length > 1900) {
+                await message.reply({
+                    files: [{ attachment: Buffer.from(result, "utf-8"), name: "deobfuscated.lua" }]
+                });
             } else {
-                await message.reply(`\`\`\`lua\n${result.result}\n\`\`\``);
+                await message.reply(`\`\`\`lua\n${result}\n\`\`\``);
             }
             
             await msg.delete();
@@ -174,12 +179,13 @@ client.on("messageCreate", async (message) => {
         }
     }
     
+    // .detect command
     if (command === "detect") {
         const content = userScripts.get(message.author.id);
         if (!content) return message.reply("❌ No script. Use `.get` first");
         
         const deobf = new LunrDeobfuscator(content);
-        await message.reply(`🔍 **Obfuscator:** ${deobf.detect()}`);
+        await message.reply(`🔍 **${deobf.detect()}**`);
     }
 });
 
