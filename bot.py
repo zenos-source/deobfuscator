@@ -5,8 +5,7 @@ import tempfile
 import os
 import re
 import sys
-import base64
-import zlib
+import asyncio
 
 print(f"Python version: {sys.version}")
 print("Starting Lunr Bot...")
@@ -31,11 +30,11 @@ async def fetch_url(url):
     async with aiohttp.ClientSession() as session:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         try:
-            async with session.get(url, headers=headers, timeout=15) as resp:
+            async with session.get(url, headers=headers, timeout=10) as resp:
                 if resp.status == 200:
                     return await resp.text()
-        except:
-            pass
+        except Exception as e:
+            print(f"Fetch error: {e}")
     return None
 
 def extract_url_from_loadstring(content):
@@ -70,49 +69,72 @@ async def fetch_script(target):
     return None
 
 # ============================================================
-# DEOBFUSCATION FUNCTIONS
+# SIMPLE DEOBFUSCATION (NON-BLOCKING)
 # ============================================================
 
-def decode_octal_strings(content):
-    return re.sub(r'\\(\d{3})', lambda m: chr(int(m.group(1), 8)), content)
-
-def decode_hex_strings(content):
-    return re.sub(r'\\x([0-9a-fA-F]{2})', lambda m: chr(int(m.group(1), 16)), content)
-
-def decode_string_char(content):
-    pattern = r'string\.char\(([^)]+)\)'
-    def replace(match):
+def simple_deobfuscate(content):
+    """Fast deobfuscation that won't timeout"""
+    result = content
+    changes = False
+    
+    # Decode octal sequences \123
+    def decode_octal(match):
+        nonlocal changes
+        changes = True
+        return chr(int(match.group(1), 8))
+    
+    result = re.sub(r'\\(\d{3})', decode_octal, result)
+    
+    # Decode hex sequences \x48
+    def decode_hex(match):
+        nonlocal changes
+        changes = True
+        return chr(int(match.group(1), 16))
+    
+    result = re.sub(r'\\x([0-9a-fA-F]{2})', decode_hex, result)
+    
+    # Decode string.char(65,66,67)
+    def decode_string_char(match):
+        nonlocal changes
         numbers = re.findall(r'(\d+)', match.group(1))
         try:
             return '"' + ''.join(chr(int(n)) for n in numbers) + '"'
         except:
             return match.group(0)
-    return re.sub(pattern, replace, content)
-
-def wearedevs_deobfuscate(content):
-    print("Running WeAreDevs deobfuscator...")
     
+    result = re.sub(r'string\.char\(([^)]+)\)', decode_string_char, result)
+    
+    return result, changes
+
+def wearedevs_fast(content):
+    """Fast WeAreDevs deobfuscation"""
+    result = content
+    
+    # Extract string table
     table_match = re.search(r'local d = \{(.*?)\};', content, re.DOTALL)
     if not table_match:
-        return content
+        return content, False
     
     table_content = table_match.group(1)
     raw_strings = re.findall(r'"((?:\\\d{3}|[^"])*)"', table_content)
-    decoded_strings = []
     
+    if not raw_strings:
+        return content, False
+    
+    decoded_strings = []
     for s in raw_strings:
         decoded = re.sub(r'\\(\d{3})', lambda m: chr(int(m.group(1), 8)), s)
         decoded = decoded.replace('\\\\', '\\')
         decoded_strings.append(decoded)
     
-    print(f"  Decoded {len(decoded_strings)} strings")
-    
-    result = content
+    # Replace references
     for i, decoded in enumerate(decoded_strings, 1):
         result = re.sub(r'd\s*\[\s*' + str(i) + r'\s*\]', repr(decoded), result)
     
+    # Remove the table
     result = re.sub(r'local d = \{.*?\};', '', result, flags=re.DOTALL)
     
+    # Extract inner function if present
     func_match = re.search(r'return\(function\([^)]*\)(.*?)end\)', result, re.DOTALL)
     if func_match:
         inner = func_match.group(1)
@@ -120,52 +142,7 @@ def wearedevs_deobfuscate(content):
         inner = re.sub(r'\}[^}]*$', '', inner)
         result = inner
     
-    return result
-
-def moonsec_string_extract(content):
-    result = content
-    table_pattern = r'local\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\{([^}]+)\}'
-    
-    for match in re.finditer(table_pattern, content):
-        var_name = match.group(1)
-        table_body = match.group(2)
-        strings = re.findall(r'"((?:[^"\\]|\\.)*)"', table_body)
-        
-        for i, s in enumerate(strings, 1):
-            result = re.sub(rf'{var_name}\[(\s*){i}(\s*)\]', f'"{s}"', result)
-    
-    return result
-
-def moonsec_deobfuscate(content):
-    print("Running MoonSec deobfuscator...")
-    content = decode_hex_strings(content)
-    content = decode_string_char(content)
-    content = moonsec_string_extract(content)
-    content = re.sub(r'\n\s*\n', '\n', content)
-    return content
-
-async def resolve_loadstrings(content, depth=0):
-    if depth > 3:
-        return content
-    
-    pattern = r'loadstring\(game:HttpGet\(["\']([^"\']+)["\']\)\)\s*\(?\)?'
-    matches = re.findall(pattern, content)
-    
-    async with aiohttp.ClientSession() as session:
-        for url in matches:
-            try:
-                async with session.get(url, timeout=10) as resp:
-                    if resp.status == 200:
-                        fetched = await resp.text()
-                        content = content.replace(
-                            f'loadstring(game:HttpGet("{url}"))',
-                            f'\n--[[ Resolved from {url} ]]\n{fetched}\n--[[ End resolve ]]\n'
-                        )
-                        content = await resolve_loadstrings(content, depth + 1)
-            except:
-                pass
-    
-    return content
+    return result, True
 
 def detect_obfuscator(content):
     if 'wearedevs.net/obfuscator' in content:
@@ -176,38 +153,35 @@ def detect_obfuscator(content):
         return 'moonsec'
     if 'ironbrew' in content.lower():
         return 'ironbrew'
-    if 'prometheus' in content.lower():
-        return 'prometheus'
-    if 'luraph' in content.lower():
-        return 'luraph'
     return 'unknown'
 
 async def full_deobfuscate(content):
+    """Non-blocking deobfuscation with timeout"""
     original_len = len(content)
     obf_type = detect_obfuscator(content)
     
     print(f"Detected: {obf_type}")
     
-    content = decode_octal_strings(content)
-    content = decode_hex_strings(content)
-    content = decode_string_char(content)
+    result = content
     
+    # Always run basic decoders
+    result, changed = simple_deobfuscate(result)
+    
+    # Run specific deobfuscators
     if obf_type == 'wearedevs':
-        content = wearedevs_deobfuscate(content)
-    elif obf_type == 'moonsec':
-        content = moonsec_deobfuscate(content)
-    elif obf_type == 'ironbrew':
-        content = moonsec_string_extract(content)
-        content = decode_string_char(content)
+        result, changed2 = wearedevs_fast(result)
+        changed = changed or changed2
     
-    content = await resolve_loadstrings(content)
+    # Clean up whitespace
+    result = re.sub(r'\n\s*\n', '\n', result)
+    result = re.sub(r';\s*\n', '\n', result)
     
-    content = re.sub(r'\n\s*\n', '\n', content)
-    content = re.sub(r';\s*\n', '\n', content)
+    # Remove excessive whitespace at start/end
+    result = result.strip()
     
-    print(f"Result: {original_len} -> {len(content)} bytes")
+    print(f"Result: {original_len} -> {len(result)} bytes, changed={changed}")
     
-    return content, obf_type
+    return result, obf_type, changed
 
 # ============================================================
 # DISCORD COMMANDS
@@ -226,7 +200,7 @@ async def get_script(ctx, *, target):
     user_scripts[ctx.author.id] = content
     
     obf_type = detect_obfuscator(content)
-    preview = content[:400] + ('...' if len(content) > 400 else '')
+    preview = content[:300] + ('...' if len(content) > 300 else '')
     
     await ctx.send(f"✅ {len(content)} bytes | Detected: **{obf_type}**")
     await ctx.send(f"```lua\n{preview}\n```")
@@ -238,24 +212,47 @@ async def deobfuscate(ctx):
         await ctx.send("❌ No script. Use `.get` first")
         return
     
-    await ctx.send("🔧 Deobfuscating... (this may take a moment)")
+    # Send initial message
+    msg = await ctx.send("🔧 Deobfuscating... (0%)")
     
-    original = user_scripts[ctx.author.id]
-    result, obf_type = await full_deobfuscate(original)
-    
-    if result == original:
-        await ctx.send(f"⚠️ Could not deobfuscate **{obf_type}**. The script may use advanced VM protection.")
-        return
-    
-    if len(result) > 1900:
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False) as f:
-            f.write(result)
-            await ctx.send(file=discord.File(f.name, filename='deobfuscated.lua'))
-        os.unlink(f.name)
-    else:
-        await ctx.send(f"```lua\n{result}\n```")
-    
-    del user_scripts[ctx.author.id]
+    try:
+        # Run deobfuscation with timeout
+        original = user_scripts[ctx.author.id]
+        
+        # Update progress
+        await msg.edit(content="🔧 Deobfuscating... (25%)")
+        
+        # Run deobfuscation (with timeout)
+        result, obf_type, changed = await asyncio.wait_for(
+            full_deobfuscate(original),
+            timeout=30.0
+        )
+        
+        await msg.edit(content="🔧 Deobfuscating... (75%)")
+        
+        if not changed or result == original:
+            await msg.edit(content=f"⚠️ Could not deobfuscate **{obf_type}**. The script may use advanced VM protection or is not obfuscated.")
+            return
+        
+        await msg.edit(content="🔧 Deobfuscating... (100%) - Sending result")
+        
+        # Send result
+        if len(result) > 1900:
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False) as f:
+                f.write(result)
+                await ctx.send(file=discord.File(f.name, filename='deobfuscated.lua'))
+            os.unlink(f.name)
+        else:
+            await ctx.send(f"```lua\n{result}\n```")
+        
+        await msg.delete()
+        del user_scripts[ctx.author.id]
+        
+    except asyncio.TimeoutError:
+        await msg.edit(content="❌ Deobfuscation timed out after 30 seconds. The script is too large or complex.")
+    except Exception as e:
+        await msg.edit(content=f"❌ Error: {str(e)[:100]}")
+        print(f"Deobf error: {e}")
 
 @bot.command(name='detect')
 async def detect_only(ctx):
@@ -265,7 +262,19 @@ async def detect_only(ctx):
     
     content = user_scripts[ctx.author.id]
     obf_type = detect_obfuscator(content)
-    await ctx.send(f"🔍 **Obfuscator:** {obf_type}")
+    
+    # Show more details
+    details = []
+    if re.search(r'\\\d{3}', content):
+        details.append("- Octal escape sequences found")
+    if re.search(r'\\x[0-9a-fA-F]{2}', content):
+        details.append("- Hex escape sequences found")
+    if re.search(r'string\.char\(', content):
+        details.append("- string.char() patterns found")
+    if re.search(r'local d = \{', content):
+        details.append("- WeAreDevs string table found")
+    
+    await ctx.send(f"🔍 **Obfuscator:** {obf_type}\n" + "\n".join(details))
 
 @bot.event
 async def on_ready():
