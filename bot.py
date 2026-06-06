@@ -69,46 +69,65 @@ async def fetch_script(target):
     return None
 
 # ============================================================
-# SIMPLE DEOBFUSCATION (NON-BLOCKING)
+# SAFE DEOBFUSCATION FUNCTIONS
 # ============================================================
 
+def safe_octal_to_char(match):
+    """Safely convert octal to character, skip invalid"""
+    octal = match.group(1)
+    try:
+        # Only convert if it's a valid octal number (0-7 digits)
+        if all(c in '01234567' for c in octal):
+            return chr(int(octal, 8))
+    except:
+        pass
+    return match.group(0)  # Return original if invalid
+
+def safe_hex_to_char(match):
+    """Safely convert hex to character"""
+    try:
+        return chr(int(match.group(1), 16))
+    except:
+        return match.group(0)
+
+def safe_string_char_decode(match):
+    """Safely decode string.char(...) calls"""
+    numbers = re.findall(r'(\d+)', match.group(1))
+    try:
+        result = []
+        for n in numbers:
+            try:
+                result.append(chr(int(n)))
+            except:
+                result.append(n)
+        return '"' + ''.join(result) + '"'
+    except:
+        return match.group(0)
+
 def simple_deobfuscate(content):
-    """Fast deobfuscation that won't timeout"""
+    """Fast deobfuscation with safe error handling"""
     result = content
     changes = False
     
-    # Decode octal sequences \123
-    def decode_octal(match):
-        nonlocal changes
+    # Safe octal decode - only convert valid octal numbers (max 3 digits, digits 0-7)
+    result = re.sub(r'\\(\d{1,3})', safe_octal_to_char, result)
+    
+    # Safe hex decode
+    result = re.sub(r'\\x([0-9a-fA-F]{2})', safe_hex_to_char, result)
+    
+    # Safe string.char decode
+    result = re.sub(r'string\.char\(([^)]+)\)', safe_string_char_decode, result)
+    
+    # Check if any changes were made
+    if result != content:
         changes = True
-        return chr(int(match.group(1), 8))
-    
-    result = re.sub(r'\\(\d{3})', decode_octal, result)
-    
-    # Decode hex sequences \x48
-    def decode_hex(match):
-        nonlocal changes
-        changes = True
-        return chr(int(match.group(1), 16))
-    
-    result = re.sub(r'\\x([0-9a-fA-F]{2})', decode_hex, result)
-    
-    # Decode string.char(65,66,67)
-    def decode_string_char(match):
-        nonlocal changes
-        numbers = re.findall(r'(\d+)', match.group(1))
-        try:
-            return '"' + ''.join(chr(int(n)) for n in numbers) + '"'
-        except:
-            return match.group(0)
-    
-    result = re.sub(r'string\.char\(([^)]+)\)', decode_string_char, result)
     
     return result, changes
 
 def wearedevs_fast(content):
     """Fast WeAreDevs deobfuscation"""
     result = content
+    changes = False
     
     # Extract string table
     table_match = re.search(r'local d = \{(.*?)\};', content, re.DOTALL)
@@ -123,13 +142,15 @@ def wearedevs_fast(content):
     
     decoded_strings = []
     for s in raw_strings:
-        decoded = re.sub(r'\\(\d{3})', lambda m: chr(int(m.group(1), 8)), s)
+        # Safe octal decode for each string
+        decoded = re.sub(r'\\(\d{3})', safe_octal_to_char, s)
         decoded = decoded.replace('\\\\', '\\')
         decoded_strings.append(decoded)
     
     # Replace references
     for i, decoded in enumerate(decoded_strings, 1):
         result = re.sub(r'd\s*\[\s*' + str(i) + r'\s*\]', repr(decoded), result)
+        changes = True
     
     # Remove the table
     result = re.sub(r'local d = \{.*?\};', '', result, flags=re.DOTALL)
@@ -141,8 +162,9 @@ def wearedevs_fast(content):
         inner = re.sub(r'^[^{]*\{', '', inner)
         inner = re.sub(r'\}[^}]*$', '', inner)
         result = inner
+        changes = True
     
-    return result, True
+    return result, changes
 
 def detect_obfuscator(content):
     if 'wearedevs.net/obfuscator' in content:
@@ -153,6 +175,10 @@ def detect_obfuscator(content):
         return 'moonsec'
     if 'ironbrew' in content.lower():
         return 'ironbrew'
+    if re.search(r'\\x[0-9a-fA-F]{2}', content):
+        return 'unknown (has hex encoding)'
+    if re.search(r'\\\d{3}', content):
+        return 'unknown (has octal encoding)'
     return 'unknown'
 
 async def full_deobfuscate(content):
@@ -161,25 +187,26 @@ async def full_deobfuscate(content):
     obf_type = detect_obfuscator(content)
     
     print(f"Detected: {obf_type}")
+    print(f"Original length: {original_len}")
     
     result = content
+    changed = False
     
     # Always run basic decoders
-    result, changed = simple_deobfuscate(result)
+    result, changed1 = simple_deobfuscate(result)
+    changed = changed or changed1
     
     # Run specific deobfuscators
     if obf_type == 'wearedevs':
         result, changed2 = wearedevs_fast(result)
         changed = changed or changed2
     
-    # Clean up whitespace
+    # Clean up whitespace (safe operations only)
     result = re.sub(r'\n\s*\n', '\n', result)
     result = re.sub(r';\s*\n', '\n', result)
-    
-    # Remove excessive whitespace at start/end
     result = result.strip()
     
-    print(f"Result: {original_len} -> {len(result)} bytes, changed={changed}")
+    print(f"Result length: {len(result)}, changed: {changed}")
     
     return result, obf_type, changed
 
@@ -213,28 +240,20 @@ async def deobfuscate(ctx):
         return
     
     # Send initial message
-    msg = await ctx.send("🔧 Deobfuscating... (0%)")
+    msg = await ctx.send("🔧 Deobfuscating...")
     
     try:
-        # Run deobfuscation with timeout
         original = user_scripts[ctx.author.id]
         
-        # Update progress
-        await msg.edit(content="🔧 Deobfuscating... (25%)")
-        
-        # Run deobfuscation (with timeout)
+        # Run deobfuscation with timeout
         result, obf_type, changed = await asyncio.wait_for(
             full_deobfuscate(original),
             timeout=30.0
         )
         
-        await msg.edit(content="🔧 Deobfuscating... (75%)")
-        
         if not changed or result == original:
-            await msg.edit(content=f"⚠️ Could not deobfuscate **{obf_type}**. The script may use advanced VM protection or is not obfuscated.")
+            await msg.edit(content=f"⚠️ Could not deobfuscate **{obf_type}**. The script may not be obfuscated or uses advanced VM protection.")
             return
-        
-        await msg.edit(content="🔧 Deobfuscating... (100%) - Sending result")
         
         # Send result
         if len(result) > 1900:
@@ -243,7 +262,8 @@ async def deobfuscate(ctx):
                 await ctx.send(file=discord.File(f.name, filename='deobfuscated.lua'))
             os.unlink(f.name)
         else:
-            await ctx.send(f"```lua\n{result}\n```")
+            # Split into multiple messages if needed
+            await ctx.send(f"```lua\n{result[:1900]}\n```")
         
         await msg.delete()
         del user_scripts[ctx.author.id]
@@ -252,7 +272,7 @@ async def deobfuscate(ctx):
         await msg.edit(content="❌ Deobfuscation timed out after 30 seconds. The script is too large or complex.")
     except Exception as e:
         await msg.edit(content=f"❌ Error: {str(e)[:100]}")
-        print(f"Deobf error: {e}")
+        print(f"Deobf error details: {e}")
 
 @bot.command(name='detect')
 async def detect_only(ctx):
@@ -266,7 +286,9 @@ async def detect_only(ctx):
     # Show more details
     details = []
     if re.search(r'\\\d{3}', content):
-        details.append("- Octal escape sequences found")
+        octal_matches = re.findall(r'\\(\d{3})', content)
+        valid_octal = [o for o in octal_matches if all(c in '01234567' for c in o)]
+        details.append(f"- Octal sequences: {len(octal_matches)} total, {len(valid_octal)} valid")
     if re.search(r'\\x[0-9a-fA-F]{2}', content):
         details.append("- Hex escape sequences found")
     if re.search(r'string\.char\(', content):
