@@ -1,1 +1,8 @@
-worker: npm start
+[phases.setup]
+nixPkgs = ["nodejs_20"]
+
+[phases.install]
+cmds = ["npm install"]
+
+[phases.start]
+cmd = "npm start"
