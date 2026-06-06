@@ -51,22 +51,18 @@ def extract_url_from_loadstring(content):
     return None
 
 async def fetch_script(target):
-    # Direct URL
     if target.startswith('http'):
         return await fetch_url(target)
     
-    # Roblox asset ID
     if target.isdigit():
         url = f"https://raw.roblox.com/asset/?id={target}"
         return await fetch_url(url)
     
-    # Loadstring code
     if 'loadstring' in target:
         url = extract_url_from_loadstring(target)
         if url:
             return await fetch_url(url)
     
-    # Any URL in text
     url_match = re.search(r'https?://[^\s"\'<>]+', target)
     if url_match:
         return await fetch_url(url_match.group(0))
@@ -78,15 +74,12 @@ async def fetch_script(target):
 # ============================================================
 
 def decode_octal_strings(content):
-    """Decode \123 octal patterns"""
     return re.sub(r'\\(\d{3})', lambda m: chr(int(m.group(1), 8)), content)
 
 def decode_hex_strings(content):
-    """Decode \x48 hex patterns"""
     return re.sub(r'\\x([0-9a-fA-F]{2})', lambda m: chr(int(m.group(1), 16)), content)
 
 def decode_string_char(content):
-    """Decode string.char(65,66,67) patterns"""
     pattern = r'string\.char\(([^)]+)\)'
     def replace(match):
         numbers = re.findall(r'(\d+)', match.group(1))
@@ -97,17 +90,13 @@ def decode_string_char(content):
     return re.sub(pattern, replace, content)
 
 def wearedevs_deobfuscate(content):
-    """Complete WeAreDevs deobfuscator"""
     print("Running WeAreDevs deobfuscator...")
     
-    # Step 1: Find the string table
     table_match = re.search(r'local d = \{(.*?)\};', content, re.DOTALL)
     if not table_match:
         return content
     
     table_content = table_match.group(1)
-    
-    # Step 2: Extract and decode strings
     raw_strings = re.findall(r'"((?:\\\d{3}|[^"])*)"', table_content)
     decoded_strings = []
     
@@ -118,15 +107,12 @@ def wearedevs_deobfuscate(content):
     
     print(f"  Decoded {len(decoded_strings)} strings")
     
-    # Step 3: Replace references
     result = content
     for i, decoded in enumerate(decoded_strings, 1):
         result = re.sub(r'd\s*\[\s*' + str(i) + r'\s*\]', repr(decoded), result)
     
-    # Step 4: Remove the table
     result = re.sub(r'local d = \{.*?\};', '', result, flags=re.DOTALL)
     
-    # Step 5: Extract inner function
     func_match = re.search(r'return\(function\([^)]*\)(.*?)end\)', result, re.DOTALL)
     if func_match:
         inner = func_match.group(1)
@@ -137,17 +123,12 @@ def wearedevs_deobfuscate(content):
     return result
 
 def moonsec_string_extract(content):
-    """Extract MoonSec string tables"""
     result = content
-    
-    # Find local TABLE = { "string1", "string2", ... }
     table_pattern = r'local\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\{([^}]+)\}'
     
     for match in re.finditer(table_pattern, content):
         var_name = match.group(1)
         table_body = match.group(2)
-        
-        # Extract strings
         strings = re.findall(r'"((?:[^"\\]|\\.)*)"', table_body)
         
         for i, s in enumerate(strings, 1):
@@ -156,25 +137,14 @@ def moonsec_string_extract(content):
     return result
 
 def moonsec_deobfuscate(content):
-    """MoonSec deobfuscation pipeline"""
     print("Running MoonSec deobfuscator...")
-    
-    # Decode hex
     content = decode_hex_strings(content)
-    
-    # Decode string.char
     content = decode_string_char(content)
-    
-    # Extract string tables
     content = moonsec_string_extract(content)
-    
-    # Clean up
     content = re.sub(r'\n\s*\n', '\n', content)
-    
     return content
 
 async def resolve_loadstrings(content, depth=0):
-    """Follow loadstring chains"""
     if depth > 3:
         return content
     
@@ -198,7 +168,6 @@ async def resolve_loadstrings(content, depth=0):
     return content
 
 def detect_obfuscator(content):
-    """Detect which obfuscator was used"""
     if 'wearedevs.net/obfuscator' in content:
         return 'wearedevs'
     if re.search(r'local d = \{\\d{3}', content):
@@ -214,18 +183,15 @@ def detect_obfuscator(content):
     return 'unknown'
 
 async def full_deobfuscate(content):
-    """Main deobfuscation pipeline"""
     original_len = len(content)
     obf_type = detect_obfuscator(content)
     
     print(f"Detected: {obf_type}")
     
-    # Always run basic decoders
     content = decode_octal_strings(content)
     content = decode_hex_strings(content)
     content = decode_string_char(content)
     
-    # Run specific deobfuscators
     if obf_type == 'wearedevs':
         content = wearedevs_deobfuscate(content)
     elif obf_type == 'moonsec':
@@ -234,10 +200,8 @@ async def full_deobfuscate(content):
         content = moonsec_string_extract(content)
         content = decode_string_char(content)
     
-    # Follow loadstrings
     content = await resolve_loadstrings(content)
     
-    # Final cleanup
     content = re.sub(r'\n\s*\n', '\n', content)
     content = re.sub(r';\s*\n', '\n', content)
     
@@ -251,7 +215,6 @@ async def full_deobfuscate(content):
 
 @bot.command(name='get')
 async def get_script(ctx, *, target):
-    """Fetch a script from URL, asset ID, or loadstring code"""
     await ctx.send(f"🔍 Fetching...")
     
     content = await fetch_script(target)
@@ -271,7 +234,6 @@ async def get_script(ctx, *, target):
 
 @bot.command(name='deobf')
 async def deobfuscate(ctx):
-    """Deobfuscate the last fetched script"""
     if ctx.author.id not in user_scripts:
         await ctx.send("❌ No script. Use `.get` first")
         return
@@ -297,7 +259,6 @@ async def deobfuscate(ctx):
 
 @bot.command(name='detect')
 async def detect_only(ctx):
-    """Detect obfuscator without deobfuscating"""
     if ctx.author.id not in user_scripts:
         await ctx.send("❌ No script. Use `.get` first")
         return
@@ -306,26 +267,10 @@ async def detect_only(ctx):
     obf_type = detect_obfuscator(content)
     await ctx.send(f"🔍 **Obfuscator:** {obf_type}")
 
-@bot.command(name='help')
-async def help_command(ctx):
-    """Show available commands"""
-    embed = discord.Embed(
-        title="Lunr Bot Commands",
-        description="Lua deobfuscation bot for Roblox scripts",
-        color=0x5865F2
-    )
-    embed.add_field(name="`.get <url/id/loadstring>`", value="Fetch a script", inline=False)
-    embed.add_field(name="`.deobf`", value="Deobfuscate the fetched script", inline=False)
-    embed.add_field(name="`.detect`", value="Detect obfuscator type", inline=False)
-    embed.add_field(name="`.help`", value="Show this help", inline=False)
-    embed.set_footer(text="Supports: WeAreDevs, MoonSec, IronBrew")
-    await ctx.send(embed=embed)
-
 @bot.event
 async def on_ready():
     print(f"✅ Lunr Bot ready - {bot.user}")
-    print(f"📡 Prefix: .")
-    print(f"📡 Commands: .get, .deobf, .detect, .help")
+    print(f"📡 Commands: .get, .deobf, .detect")
 
 if __name__ == "__main__":
     bot.run(TOKEN)
