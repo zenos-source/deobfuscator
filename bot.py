@@ -65,19 +65,19 @@ async def resolve_loadstrings(content, depth=0):
 
 @bot.command(name='get')
 async def get_script(ctx, target):
-    await ctx.send(f"Fetching {target}...")
+    await ctx.send(f"🔍 Fetching `{target}`...")
     
     if target.isdigit():
         url = f"https://raw.roblox.com/asset/?id={target}"
     elif target.startswith('http'):
         url = target
     else:
-        await ctx.send("Give me asset ID or URL")
+        await ctx.send("❌ Give me asset ID or URL")
         return
     
     content = await fetch_url(url)
     if not content:
-        await ctx.send("Failed to fetch")
+        await ctx.send("❌ Failed to fetch")
         return
     
     with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False) as f:
@@ -85,16 +85,16 @@ async def get_script(ctx, target):
         user_scripts[ctx.author.id] = {'path': f.name, 'content': content}
     
     preview = content[:400] + ('...' if len(content) > 400 else '')
-    await ctx.send(f"Got {len(content)} bytes\n```lua\n{preview}\n```")
-    await ctx.send("Use .deobf")
+    await ctx.send(f"✅ Got {len(content)} bytes\n```lua\n{preview}\n```")
+    await ctx.send("🔧 Use `.deobf` to deobfuscate")
 
 @bot.command(name='deobf')
 async def deobfuscate(ctx):
     if ctx.author.id not in user_scripts:
-        await ctx.send("No script. Use .get first")
+        await ctx.send("❌ No script. Use `.get` first")
         return
     
-    await ctx.send("Deobfuscating...")
+    await ctx.send("🔧 Deobfuscating...")
     script = user_scripts[ctx.author.id]
     content = script['content']
     
@@ -104,7 +104,7 @@ async def deobfuscate(ctx):
     if len(content) > 1900:
         with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False) as f:
             f.write(content)
-            await ctx.send(file=discord.File(f.name, filename='output.lua'))
+            await ctx.send(file=discord.File(f.name, filename='deobfuscated.lua'))
         os.unlink(f.name)
     else:
         await ctx.send(f"```lua\n{content}\n```")
@@ -115,6 +115,7 @@ async def deobfuscate(ctx):
 @bot.event
 async def on_ready():
     print(f"✅ Lunr Bot ready - {bot.user}")
+    print(f"📡 Invite: https://discord.com/oauth2/authorize?client_id={bot.user.id}&permissions=274877958144&scope=bot")
 
 if __name__ == "__main__":
     bot.run(TOKEN)
