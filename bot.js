@@ -16,7 +16,6 @@ const client = new Client({
     ]
 });
 
-// Store scripts per user
 const userScripts = new Map();
 
 // ============================================================
@@ -42,26 +41,20 @@ class LunrDeobfuscator {
         this.obfuscatorType = this.detect();
         let result = this.code;
         
-        // Decode \123 octal
         result = result.replace(/\\(\d{3})/g, (_, oct) => {
-            if (/[0-7]{3}/.test(oct)) {
-                return String.fromCharCode(parseInt(oct, 8));
-            }
+            if (/[0-7]{3}/.test(oct)) return String.fromCharCode(parseInt(oct, 8));
             return `\\${oct}`;
         });
         
-        // Decode \x48 hex
         result = result.replace(/\\x([0-9a-fA-F]{2})/g, (_, hex) => {
             return String.fromCharCode(parseInt(hex, 16));
         });
         
-        // Decode string.char(65,66)
         result = result.replace(/string\.char\(([^)]+)\)/g, (_, nums) => {
             const chars = nums.split(",").map(n => String.fromCharCode(parseInt(n.trim())));
             return `"${chars.join("")}"`;
         });
         
-        // Extract and decode string tables
         const tableMatch = result.match(/local\s+([a-z_]+)\s*=\s*\{([^}]+)\}/);
         if (tableMatch) {
             const varName = tableMatch[1];
@@ -77,7 +70,6 @@ class LunrDeobfuscator {
             }
         }
         
-        // Cleanup
         result = result.replace(/\n\s*\n/g, "\n").trim();
         result = result.replace(/;\s*\n/g, "\n");
         
@@ -85,10 +77,6 @@ class LunrDeobfuscator {
         return result;
     }
 }
-
-// ============================================================
-// FETCH FUNCTIONS
-// ============================================================
 
 async function fetchUrl(url) {
     try {
@@ -107,11 +95,15 @@ async function fetchScript(target) {
 }
 
 // ============================================================
-// DISCORD COMMANDS (using . prefix)
+// DISCORD COMMANDS
 // ============================================================
 
 client.once("ready", () => {
     console.log(`✅ Lunr Bot ready - ${client.user.tag}`);
+    
+    // FIX #1: Set status to online
+    client.user.setPresence({ status: 'online' });
+    
     console.log(`📡 Commands: .get <url/id>, .deobf, .detect`);
 });
 
@@ -122,7 +114,6 @@ client.on("messageCreate", async (message) => {
     const args = message.content.slice(1).trim().split(/ +/);
     const command = args.shift().toLowerCase();
     
-    // .get command
     if (command === "get") {
         const target = args.join(" ");
         if (!target) {
@@ -145,7 +136,6 @@ client.on("messageCreate", async (message) => {
         await message.reply(`✅ **${content.length} bytes** | Obfuscator: **${obfType}**\n\`\`\`lua\n${preview}\n\`\`\`\n🔧 Use \`.deobf\` to deobfuscate`);
     }
     
-    // .deobf command
     if (command === "deobf") {
         const content = userScripts.get(message.author.id);
         if (!content) {
@@ -179,7 +169,6 @@ client.on("messageCreate", async (message) => {
         }
     }
     
-    // .detect command
     if (command === "detect") {
         const content = userScripts.get(message.author.id);
         if (!content) {
@@ -190,7 +179,6 @@ client.on("messageCreate", async (message) => {
         await message.reply(`🔍 **Obfuscator:** ${deobf.detect()}`);
     }
     
-    // .help command
     if (command === "help") {
         await message.reply(`
 **Lunr Bot Commands**
