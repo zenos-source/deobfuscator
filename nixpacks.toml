@@ -1,8 +1,12 @@
 [phases.setup]
-nixPkgs = ["python311", "python311Packages.pip"]
+nixPkgs = ["python311", "python311Packages.pip", "dotnet-sdk_8", "openjdk17", "git"]
 
 [phases.install]
-cmds = ["pip install --break-system-packages -r requirements.txt"]
+cmds = [
+    "pip install -r requirements.txt",
+    "git clone https://github.com/tupsutumppu/MoonsecDeobfuscator.git",
+    "cd MoonsecDeobfuscator && dotnet restore && dotnet build -c Release"
+]
 
 [phases.start]
 cmd = "python3.11 bot.py"
