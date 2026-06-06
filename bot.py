@@ -3,9 +3,17 @@ from discord.ext import commands
 import aiohttp
 import tempfile
 import os
-from pipeline import full_deobfuscation
+import re
+import sys
+
+print(f"Python version: {sys.version}")
+print("Starting Lunr Bot...")
 
 TOKEN = os.getenv("DISCORD_TOKEN")
+
+if not TOKEN:
+    print("ERROR: DISCORD_TOKEN not set")
+    sys.exit(1)
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -20,6 +28,41 @@ async def fetch_url(url):
                 return await resp.text()
     return None
 
+def decode_hex(content):
+    result = content
+    hex_pattern = r'["\']([0-9a-fA-F]{20,})["\']'
+    for match in re.finditer(hex_pattern, content):
+        hex_str = match.group(1)
+        try:
+            decoded = bytes.fromhex(hex_str).decode('utf-8', errors='ignore')
+            result = result.replace(f'"{hex_str}"', f'--[[hex decoded]]\n"{decoded}"')
+        except:
+            pass
+    return result
+
+async def resolve_loadstrings(content, depth=0):
+    if depth > 3:
+        return content
+    patterns = [
+        r'loadstring\(game:HttpGet\(["\']([^"\']+)["\']\)\)',
+    ]
+    async with aiohttp.ClientSession() as session:
+        for pattern in patterns:
+            matches = re.findall(pattern, content)
+            for url in matches:
+                try:
+                    async with session.get(url, timeout=10) as resp:
+                        if resp.status == 200:
+                            fetched = await resp.text()
+                            content = content.replace(
+                                f'loadstring(game:HttpGet("{url}"))',
+                                f'--[[ from {url} ]]\n{fetched}\n--[[ end ]]'
+                            )
+                            content = await resolve_loadstrings(content, depth + 1)
+                except:
+                    pass
+    return content
+
 @bot.command(name='get')
 async def get_script(ctx, target):
     await ctx.send(f"Fetching {target}...")
@@ -29,7 +72,7 @@ async def get_script(ctx, target):
     elif target.startswith('http'):
         url = target
     else:
-        await ctx.send("Give me a valid asset ID or URL")
+        await ctx.send("Give me asset ID or URL")
         return
     
     content = await fetch_url(url)
@@ -41,38 +84,37 @@ async def get_script(ctx, target):
         f.write(content)
         user_scripts[ctx.author.id] = {'path': f.name, 'content': content}
     
-    preview = content[:500] + ('...' if len(content) > 500 else '')
+    preview = content[:400] + ('...' if len(content) > 400 else '')
     await ctx.send(f"Got {len(content)} bytes\n```lua\n{preview}\n```")
-    await ctx.send("Use .deobf to deobfuscate")
+    await ctx.send("Use .deobf")
 
 @bot.command(name='deobf')
 async def deobfuscate(ctx):
     if ctx.author.id not in user_scripts:
-        await ctx.send("No script found. Use .get first")
+        await ctx.send("No script. Use .get first")
         return
     
     await ctx.send("Deobfuscating...")
     script = user_scripts[ctx.author.id]
+    content = script['content']
     
-    result = await full_deobfuscation(script['content'])
+    content = decode_hex(content)
+    content = await resolve_loadstrings(content)
     
-    if len(result) > 1900:
+    if len(content) > 1900:
         with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False) as f:
-            f.write(result)
-            await ctx.send(file=discord.File(f.name, filename='deobfuscated.lua'))
+            f.write(content)
+            await ctx.send(file=discord.File(f.name, filename='output.lua'))
         os.unlink(f.name)
     else:
-        await ctx.send(f"```lua\n{result}\n```")
+        await ctx.send(f"```lua\n{content}\n```")
     
     os.unlink(script['path'])
     del user_scripts[ctx.author.id]
 
 @bot.event
 async def on_ready():
-    print(f"Lunr Bot is ready - {bot.user}")
+    print(f"✅ Lunr Bot ready - {bot.user}")
 
 if __name__ == "__main__":
-    if not TOKEN:
-        print("ERROR: DISCORD_TOKEN environment variable not set")
-    else:
-        bot.run(TOKEN)
+    bot.run(TOKEN)
