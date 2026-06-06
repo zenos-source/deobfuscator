@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, EmbedBuilder } = require("discord.js");
+const { Client, GatewayIntentBits } = require("discord.js");
 const fetch = require("node-fetch");
 
 const TOKEN = process.env.DISCORD_TOKEN;
@@ -28,7 +28,6 @@ class LunrDeobfuscator {
         this.code = code;
         this.result = "";
         this.obfuscatorType = "Unknown";
-        this.stats = { decoded: 0 };
     }
 
     detect() {
@@ -46,7 +45,6 @@ class LunrDeobfuscator {
         // Decode \123 octal
         result = result.replace(/\\(\d{3})/g, (_, oct) => {
             if (/[0-7]{3}/.test(oct)) {
-                this.stats.decoded++;
                 return String.fromCharCode(parseInt(oct, 8));
             }
             return `\\${oct}`;
@@ -54,14 +52,12 @@ class LunrDeobfuscator {
         
         // Decode \x48 hex
         result = result.replace(/\\x([0-9a-fA-F]{2})/g, (_, hex) => {
-            this.stats.decoded++;
             return String.fromCharCode(parseInt(hex, 16));
         });
         
         // Decode string.char(65,66)
         result = result.replace(/string\.char\(([^)]+)\)/g, (_, nums) => {
             const chars = nums.split(",").map(n => String.fromCharCode(parseInt(n.trim())));
-            this.stats.decoded++;
             return `"${chars.join("")}"`;
         });
         
@@ -76,7 +72,6 @@ class LunrDeobfuscator {
                         return /[0-7]{3}/.test(oct) ? String.fromCharCode(parseInt(oct, 8)) : `\\${oct}`;
                     });
                     result = result.replace(new RegExp(`${varName}\\[${i + 1}\\]`, "g"), `"${decoded}"`);
-                    this.stats.decoded++;
                 });
                 result = result.replace(new RegExp(`local ${varName} = \\{[^}]+\\};?`, "g"), "");
             }
@@ -112,12 +107,12 @@ async function fetchScript(target) {
 }
 
 // ============================================================
-// DISCORD COMMANDS
+// DISCORD COMMANDS (using . prefix)
 // ============================================================
 
 client.once("ready", () => {
     console.log(`✅ Lunr Bot ready - ${client.user.tag}`);
-    console.log(`📡 Commands: .get, .deobf, .detect`);
+    console.log(`📡 Commands: .get <url/id>, .deobf, .detect`);
 });
 
 client.on("messageCreate", async (message) => {
@@ -130,12 +125,16 @@ client.on("messageCreate", async (message) => {
     // .get command
     if (command === "get") {
         const target = args.join(" ");
-        if (!target) return message.reply("❌ Usage: `.get <url|asset_id|loadstring>`");
+        if (!target) {
+            return message.reply("❌ Usage: `.get <url or asset ID>`\nExample: `.get 123456789`");
+        }
         
         await message.reply("🔍 Fetching...");
         const content = await fetchScript(target);
         
-        if (!content) return message.reply("❌ Could not fetch script");
+        if (!content) {
+            return message.reply("❌ Could not fetch script. Try a direct URL or Roblox asset ID.");
+        }
         
         const deobf = new LunrDeobfuscator(content);
         const obfType = deobf.detect();
@@ -143,13 +142,15 @@ client.on("messageCreate", async (message) => {
         userScripts.set(message.author.id, content);
         
         const preview = content.slice(0, 400) + (content.length > 400 ? "..." : "");
-        await message.reply(`✅ ${content.length} bytes | **${obfType}**\n\`\`\`lua\n${preview}\n\`\`\`\n🔧 Use \`.deobf\``);
+        await message.reply(`✅ **${content.length} bytes** | Obfuscator: **${obfType}**\n\`\`\`lua\n${preview}\n\`\`\`\n🔧 Use \`.deobf\` to deobfuscate`);
     }
     
     // .deobf command
     if (command === "deobf") {
         const content = userScripts.get(message.author.id);
-        if (!content) return message.reply("❌ No script. Use `.get` first");
+        if (!content) {
+            return message.reply("❌ No script found. Use `.get <url or id>` first.");
+        }
         
         const msg = await message.reply("🔧 Deobfuscating...");
         
@@ -157,12 +158,11 @@ client.on("messageCreate", async (message) => {
             const deobf = new LunrDeobfuscator(content);
             const result = deobf.deobfuscate();
             
-            if (result === content) {
-                await msg.edit(`⚠️ Could not deobfuscate **${deobf.obfuscatorType}**. Script may use advanced VM protection.`);
-                return;
+            if (result === content || result.length === content.length) {
+                return msg.edit(`⚠️ Could not deobfuscate **${deobf.obfuscatorType}**. Script may use advanced VM protection.`);
             }
             
-            await msg.edit("✅ Complete!");
+            await msg.edit("✅ Deobfuscation complete!");
             
             if (result.length > 1900) {
                 await message.reply({
@@ -182,10 +182,27 @@ client.on("messageCreate", async (message) => {
     // .detect command
     if (command === "detect") {
         const content = userScripts.get(message.author.id);
-        if (!content) return message.reply("❌ No script. Use `.get` first");
+        if (!content) {
+            return message.reply("❌ No script found. Use `.get` first.");
+        }
         
         const deobf = new LunrDeobfuscator(content);
-        await message.reply(`🔍 **${deobf.detect()}**`);
+        await message.reply(`🔍 **Obfuscator:** ${deobf.detect()}`);
+    }
+    
+    // .help command
+    if (command === "help") {
+        await message.reply(`
+**Lunr Bot Commands**
+\`.get <url or asset id>\` - Fetch a script
+\`.deobf\` - Deobfuscate the fetched script
+\`.detect\` - Detect obfuscator type
+\`.help\` - Show this help
+
+**Examples**
+\`.get 123456789\`
+\`.get https://pastebin.com/raw/abc123\`
+        `);
     }
 });
 
