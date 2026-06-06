@@ -1,15 +1,8 @@
 [phases.setup]
-nixPkgs = ["python311", "python311Packages.pip", "dotnet-sdk_8", "openjdk17", "git"]
+nixPkgs = ["nodejs_20"]
 
 [phases.install]
-cmds = [
-    "pip install -r requirements.txt",
-    "git clone https://github.com/tupsutumppu/MoonsecDeobfuscator.git",
-    "cd MoonsecDeobfuscator && dotnet build -c Release"
-]
+cmds = ["npm install"]
 
 [phases.start]
-cmd = "python3.11 bot.py"
-
-[env]
-NIXPACKS_CSHARP_SDK_VERSION = "8.0"
+cmd = "npm start"
