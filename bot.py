@@ -3,6 +3,7 @@ from discord.ext import commands
 import aiohttp
 import tempfile
 import os
+import re
 import subprocess
 import asyncio
 
@@ -40,10 +41,40 @@ def detect_obfuscator(content):
         return 'WeAreDevs'
     if 'moonsec' in content.lower():
         return 'MoonSec'
+    if 'local d = {' in content and '\\' in content:
+        return 'WeAreDevs'
     return 'Unknown'
 
-async def deobf_with_larry(content):
-    """Use the Larry Dumper Lua script to deobfuscate"""
+def deobf_wearedevs(content):
+    """Decode WeAreDevs obfuscated scripts"""
+    result = content
+    
+    # Decode octal
+    result = re.sub(r'\\(\d{3})', lambda m: chr(int(m.group(1), 8)), result)
+    
+    # Decode hex
+    result = re.sub(r'\\x([0-9a-fA-F]{2})', lambda m: chr(int(m.group(1), 16)), result)
+    
+    # Decode string.char
+    result = re.sub(r'string\.char\(([^)]+)\)', 
+                    lambda m: ''.join(chr(int(x.strip())) for x in m.group(1).split(',')), 
+                    result)
+    
+    # Extract string table
+    table_match = re.search(r'local d = \{(.*?)\};', result, re.DOTALL)
+    if table_match:
+        strings = re.findall(r'"((?:\\\d{3}|[^"])*)"', table_match.group(1))
+        for i, s in enumerate(strings, 1):
+            decoded = re.sub(r'\\(\d{3})', lambda m: chr(int(m.group(1), 8)), s)
+            result = re.sub(r'd\[' + str(i) + r'\]', f'"{decoded}"', result)
+            result = re.sub(r'd\s*\[\s*' + str(i) + r'\s*\]', f'"{decoded}"', result)
+        
+        result = re.sub(r'local d = \{.*?\};', '', result, flags=re.DOTALL)
+    
+    return result
+
+async def deobf_moonsec(content):
+    """Use grimhub.lua (Larry Dumper) for MoonSec"""
     with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False) as f:
         f.write(content)
         input_file = f.name
@@ -51,35 +82,26 @@ async def deobf_with_larry(content):
     output_file = tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False).name
     
     try:
-        # Run the Larry dumper
         proc = await asyncio.create_subprocess_exec(
-            'lua', 'larry.lua', input_file, output_file,
+            'lua', 'grimhub.lua', input_file, output_file,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
-        stdout, stderr = await proc.communicate()
+        await proc.wait(timeout=30)
         
-        if proc.returncode == 0 and os.path.exists(output_file):
+        if os.path.exists(output_file):
             with open(output_file, 'r') as f:
                 result = f.read()
-            return result
-        else:
-            return content
+            if len(result) > 100:
+                return result
+        return content
     except Exception as e:
-        print(f"Larry error: {e}")
+        print(f"Error running grimhub: {e}")
         return content
     finally:
         for f in [input_file, output_file]:
             if os.path.exists(f):
                 os.unlink(f)
-
-def basic_deobf(content):
-    """Basic WeAreDevs deobfuscation"""
-    result = content
-    result = re.sub(r'\\(\d{3})', lambda m: chr(int(m.group(1), 8)), result)
-    result = re.sub(r'\\x([0-9a-fA-F]{2})', lambda m: chr(int(m.group(1), 16)), result)
-    result = re.sub(r'string\.char\(([^)]+)\)', lambda m: ''.join(chr(int(x.strip())) for x in m.group(1).split(',')), result)
-    return result
 
 @bot.command()
 async def get(ctx, target):
@@ -108,14 +130,16 @@ async def deobf(ctx):
     content = user_scripts[ctx.author.id]
     obf_type = detect_obfuscator(content)
     
-    if obf_type == 'MoonSec':
+    if obf_type == 'WeAreDevs':
+        result = deobf_wearedevs(content)
+    elif obf_type == 'MoonSec':
         await ctx.send("🔧 Using Larry Dumper for MoonSec...")
-        result = await deobf_with_larry(content)
+        result = await deobf_moonsec(content)
     else:
-        result = basic_deobf(content)
+        result = deobf_wearedevs(content)
     
-    if result == content or len(result) < 100:
-        await ctx.send("⚠️ Could not deobfuscate fully. Try using the Larry Dumper manually.")
+    if result == content or len(result) < 50:
+        await ctx.send("⚠️ Could not deobfuscate. The script may use advanced protection.")
         return
     
     if len(result) > 1900:
