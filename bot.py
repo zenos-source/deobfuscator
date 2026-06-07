@@ -4,8 +4,8 @@ import aiohttp
 import tempfile
 import os
 import re
-import subprocess
 import asyncio
+import json
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 
@@ -41,7 +41,7 @@ def detect_obfuscator(content):
         return 'WeAreDevs'
     if 'moonsec' in content.lower():
         return 'MoonSec'
-    if 'local d = {' in content and '\\' in content:
+    if re.search(r'local d = \{\\d{3}', content):
         return 'WeAreDevs'
     return 'Unknown'
 
@@ -71,37 +71,40 @@ def deobf_wearedevs(content):
         
         result = re.sub(r'local d = \{.*?\};', '', result, flags=re.DOTALL)
     
+    # Clean up
+    result = re.sub(r'\n\s*\n', '\n', result)
+    result = result.strip()
+    
     return result
 
-async def deobf_moonsec(content):
-    """Use grimhub.lua (Larry Dumper) for MoonSec"""
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False) as f:
-        f.write(content)
-        input_file = f.name
+async def deobf_moonsec_api(content):
+    """Use free deobfuscation API for MoonSec"""
+    # Try multiple free APIs
+    apis = [
+        {
+            "url": "https://de4lua.vercel.app/api/deobfuscate",
+            "method": "POST",
+            "data": {"code": content[:5000]}  # Limit length
+        },
+        {
+            "url": "https://luadeobfuscator.herokuapp.com/deobfuscate",
+            "method": "POST", 
+            "data": {"code": content[:5000]}
+        }
+    ]
     
-    output_file = tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False).name
+    for api in apis:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(api["url"], json=api["data"], timeout=15) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data.get("result") or data.get("deobfuscated"):
+                            return data.get("result") or data.get("deobfuscated")
+        except:
+            pass
     
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            'lua', 'grimhub.lua', input_file, output_file,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        await proc.wait(timeout=30)
-        
-        if os.path.exists(output_file):
-            with open(output_file, 'r') as f:
-                result = f.read()
-            if len(result) > 100:
-                return result
-        return content
-    except Exception as e:
-        print(f"Error running grimhub: {e}")
-        return content
-    finally:
-        for f in [input_file, output_file]:
-            if os.path.exists(f):
-                os.unlink(f)
+    return None
 
 @bot.command()
 async def get(ctx, target):
@@ -126,20 +129,28 @@ async def deobf(ctx):
         await ctx.send("❌ No script. Use `.get` first")
         return
     
-    await ctx.send("🔧 Deobfuscating...")
+    msg = await ctx.send("🔧 Deobfuscating...")
     content = user_scripts[ctx.author.id]
     obf_type = detect_obfuscator(content)
     
+    result = None
+    
     if obf_type == 'WeAreDevs':
         result = deobf_wearedevs(content)
+        await msg.edit(content="✅ WeAreDevs deobfuscation complete!")
     elif obf_type == 'MoonSec':
-        await ctx.send("🔧 Using Larry Dumper for MoonSec...")
-        result = await deobf_moonsec(content)
+        await msg.edit(content="🔧 MoonSec detected - trying online deobfuscator...")
+        result = await deobf_moonsec_api(content)
+        if result:
+            await msg.edit(content="✅ MoonSec deobfuscation complete!")
+        else:
+            await msg.edit(content="⚠️ Online deobfuscation failed. MoonSec requires local devirtualization.\n\nTry using Larry Dumper locally:\n```bash\nlua grimhub.lua input.lua output.lua\n```")
+            return
     else:
         result = deobf_wearedevs(content)
     
-    if result == content or len(result) < 50:
-        await ctx.send("⚠️ Could not deobfuscate. The script may use advanced protection.")
+    if not result or result == content or len(result) < 100:
+        await msg.edit(content="⚠️ Could not deobfuscate. The script may use advanced protection.")
         return
     
     if len(result) > 1900:
@@ -150,6 +161,7 @@ async def deobf(ctx):
     else:
         await ctx.send(f"```lua\n{result}\n```")
     
+    await msg.delete()
     del user_scripts[ctx.author.id]
 
 @bot.command()
