@@ -3,7 +3,7 @@ from discord.ext import commands
 import aiohttp
 import tempfile
 import os
-import re
+import subprocess
 import asyncio
 
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -17,59 +17,6 @@ intents.message_content = True
 bot = commands.Bot(command_prefix='.', intents=intents)
 
 user_scripts = {}
-
-# ============================================================
-# WEAREDEVS DEOBFUSCATOR
-# ============================================================
-
-def decode_wearedevs(content):
-    """Properly decode WeAreDevs obfuscated scripts"""
-    result = content
-    
-    # Step 1: Decode octal sequences \123
-    result = re.sub(r'\\(\d{3})', lambda m: chr(int(m.group(1), 8)), result)
-    
-    # Step 2: Decode hex sequences \x48
-    result = re.sub(r'\\x([0-9a-fA-F]{2})', lambda m: chr(int(m.group(1), 16)), result)
-    
-    # Step 3: Decode string.char() calls
-    result = re.sub(r'string\.char\(([^)]+)\)', lambda m: ''.join(chr(int(x.strip())) for x in m.group(1).split(',')), result)
-    
-    # Step 4: Extract the string table and replace references
-    table_match = re.search(r'local d = \{(.*?)\};', result, re.DOTALL)
-    if table_match:
-        table_content = table_match.group(1)
-        # Find all quoted strings in the table
-        strings = re.findall(r'"((?:\\\d{3}|[^"])*)"', table_content)
-        
-        decoded_strings = []
-        for s in strings:
-            # Decode each string
-            decoded = re.sub(r'\\(\d{3})', lambda m: chr(int(m.group(1), 8)), s)
-            decoded_strings.append(decoded)
-        
-        # Replace d[index] with actual strings
-        for i, decoded in enumerate(decoded_strings, 1):
-            result = re.sub(r'd\[%d\]' % i, f'"{decoded}"', result)
-            result = re.sub(r'd\s*\[\s*%d\s*\]' % i, f'"{decoded}"', result)
-        
-        # Remove the table definition
-        result = re.sub(r'local d = \{.*?\};', '', result, flags=re.DOTALL)
-    
-    # Step 5: Clean up
-    result = re.sub(r'\n\s*\n', '\n', result)
-    result = result.strip()
-    
-    return result
-
-def detect_obfuscator(content):
-    if 'wearedevs.net/obfuscator' in content or re.search(r'local d = \{["\\]', content):
-        return 'WeAreDevs'
-    if 'moonsec' in content.lower():
-        return 'MoonSec'
-    if 'ironbrew' in content.lower():
-        return 'IronBrew'
-    return 'Unknown'
 
 async def fetch_url(url):
     async with aiohttp.ClientSession() as session:
@@ -88,9 +35,51 @@ async def fetch_script(target):
         return await fetch_url(f'https://raw.roblox.com/asset/?id={target}')
     return None
 
-# ============================================================
-# DISCORD COMMANDS
-# ============================================================
+def detect_obfuscator(content):
+    if 'wearedevs.net/obfuscator' in content:
+        return 'WeAreDevs'
+    if 'moonsec' in content.lower():
+        return 'MoonSec'
+    return 'Unknown'
+
+async def deobf_with_larry(content):
+    """Use the Larry Dumper Lua script to deobfuscate"""
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False) as f:
+        f.write(content)
+        input_file = f.name
+    
+    output_file = tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False).name
+    
+    try:
+        # Run the Larry dumper
+        proc = await asyncio.create_subprocess_exec(
+            'lua', 'larry.lua', input_file, output_file,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await proc.communicate()
+        
+        if proc.returncode == 0 and os.path.exists(output_file):
+            with open(output_file, 'r') as f:
+                result = f.read()
+            return result
+        else:
+            return content
+    except Exception as e:
+        print(f"Larry error: {e}")
+        return content
+    finally:
+        for f in [input_file, output_file]:
+            if os.path.exists(f):
+                os.unlink(f)
+
+def basic_deobf(content):
+    """Basic WeAreDevs deobfuscation"""
+    result = content
+    result = re.sub(r'\\(\d{3})', lambda m: chr(int(m.group(1), 8)), result)
+    result = re.sub(r'\\x([0-9a-fA-F]{2})', lambda m: chr(int(m.group(1), 16)), result)
+    result = re.sub(r'string\.char\(([^)]+)\)', lambda m: ''.join(chr(int(x.strip())) for x in m.group(1).split(',')), result)
+    return result
 
 @bot.command()
 async def get(ctx, target):
@@ -119,15 +108,14 @@ async def deobf(ctx):
     content = user_scripts[ctx.author.id]
     obf_type = detect_obfuscator(content)
     
-    if obf_type == 'WeAreDevs':
-        result = decode_wearedevs(content)
+    if obf_type == 'MoonSec':
+        await ctx.send("🔧 Using Larry Dumper for MoonSec...")
+        result = await deobf_with_larry(content)
     else:
-        result = content
-        await ctx.send(f"⚠️ Unsupported obfuscator: {obf_type}")
-        return
+        result = basic_deobf(content)
     
-    if result == content:
-        await ctx.send("⚠️ Could not deobfuscate - unknown pattern")
+    if result == content or len(result) < 100:
+        await ctx.send("⚠️ Could not deobfuscate fully. Try using the Larry Dumper manually.")
         return
     
     if len(result) > 1900:
@@ -154,6 +142,6 @@ async def detect(ctx):
 async def on_ready():
     await bot.change_presence(status=discord.Status.online)
     print(f"✅ Lunr Bot ready - {bot.user}")
-    print(f"📡 Commands: .get <id/url>, .deobf, .detect")
+    print(f"📡 Commands: .get, .deobf, .detect")
 
 bot.run(TOKEN)
