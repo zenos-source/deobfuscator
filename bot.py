@@ -4,6 +4,7 @@ import aiohttp
 import tempfile
 import os
 import re
+import subprocess
 import asyncio
 
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -63,6 +64,36 @@ def deobf_wearedevs(content):
     result = re.sub(r'\n\s*\n', '\n', result).strip()
     return result
 
+async def deobf_moonsec(content):
+    """Use grimhub.lua for MoonSec deobfuscation"""
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False) as f:
+        f.write(content)
+        input_file = f.name
+    
+    output_file = tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False).name
+    
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            'lua', 'grimhub.lua', input_file, output_file,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await proc.communicate()
+        
+        if proc.returncode == 0 and os.path.exists(output_file):
+            with open(output_file, 'r') as f:
+                result = f.read()
+            if len(result) > 100:
+                return result
+        return content
+    except Exception as e:
+        print(f"grimhub error: {e}")
+        return content
+    finally:
+        for f in [input_file, output_file]:
+            if os.path.exists(f):
+                os.unlink(f)
+
 @bot.command()
 async def get(ctx, target):
     await ctx.send("🔍 Fetching...")
@@ -82,19 +113,28 @@ async def deobf(ctx):
     if ctx.author.id not in user_scripts:
         await ctx.send("❌ Use `.get` first")
         return
-    await ctx.send("🔧 Deobfuscating...")
+    
+    msg = await ctx.send("🔧 Deobfuscating...")
     content = user_scripts[ctx.author.id]
     obf_type = detect_obfuscator(content)
     
     if obf_type == 'WeAreDevs':
         result = deobf_wearedevs(content)
+        await msg.edit(content="✅ WeAreDevs deobfuscated!")
+    elif obf_type == 'MoonSec':
+        await msg.edit(content="🔧 MoonSec detected - running GrimHub dumper...")
+        result = await deobf_moonsec(content)
+        if result != content:
+            await msg.edit(content="✅ MoonSec deobfuscated with GrimHub!")
+        else:
+            await msg.edit(content="⚠️ GrimHub failed to deobfuscate this script")
+            return
     else:
-        result = content
-        await ctx.send(f"⚠️ {obf_type} not supported yet")
+        await msg.edit(content=f"⚠️ Unknown obfuscator: {obf_type}")
         return
     
     if result == content:
-        await ctx.send("⚠️ Could not deobfuscate")
+        await msg.edit(content="⚠️ Could not deobfuscate")
         return
     
     if len(result) > 1900:
@@ -104,6 +144,8 @@ async def deobf(ctx):
         os.unlink(f.name)
     else:
         await ctx.send(f"```lua\n{result}\n```")
+    
+    await msg.delete()
     del user_scripts[ctx.author.id]
 
 @bot.command()
@@ -115,23 +157,10 @@ async def detect(ctx):
     obf_type = detect_obfuscator(content)
     await ctx.send(f"🔍 **{obf_type}**")
 
-@bot.command()
-async def help(ctx):
-    await ctx.send("""
-**Lunr Bot Commands**
-`.get <url or asset id>` - Fetch a script
-`.deobf` - Deobfuscate the fetched script
-`.detect` - Detect obfuscator type
-`.help` - Show this help
-
-**Example**
-`.get 18292258091`
-`.deobf`
-    """)
-
 @bot.event
 async def on_ready():
     await bot.change_presence(status=discord.Status.online)
-    print(f"✅ Lunr Bot ready - {bot.user}")
+    print(f"✅ GrimHub Bot ready - {bot.user}")
+    print(f"📡 Commands: .get, .deobf, .detect")
 
 bot.run(TOKEN)
